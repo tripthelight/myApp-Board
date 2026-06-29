@@ -1,77 +1,48 @@
-name: myApp-Board CI/CD
+name: Build and blue-green deploy Board
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: myapp-board-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   deploy:
-    runs-on: self-hosted
-
-    env:
-      MYAPP_INFRA_DIR: /home/um/myApp-Infra
-      DRAIN_SECONDS: 10
-      STABILIZATION_SECONDS: 30
-      CHECK_INTERVAL_SECONDS: 2
+    runs-on: [self-hosted, Linux, X64, myapp-board]
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Make scripts executable
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Verify deployment environment
         run: |
-          chmod +x mvnw
-          chmod +x scripts/*.sh
+          docker version
+          docker compose version
+          docker network inspect myapp-network >/dev/null
+          docker inspect myapp-nginx >/dev/null
 
-      - name: Build & Package
+      - name: Build and deploy without downtime
+        env:
+          IMAGE_NAME: myapp-board
+          IMAGE_TAG: ${{ github.sha }}
+          MYAPP_INFRA_DIR: /home/um/myApp-Infra
+          DRAIN_SECONDS: '10'
+          STABILIZATION_SECONDS: '30'
+          CHECK_INTERVAL_SECONDS: '2'
         run: |
-          ./mvnw clean package -DskipTests
-
-      - name: Build Docker Image
-        run: |
-          IMAGE=myapp-board:${GITHUB_SHA}
-          docker build -t $IMAGE .
-
-      - name: Deploy (Blue-Green + Rollback)
-        run: |
-          IMAGE=myapp-board:${GITHUB_SHA}
-
-          set +e
-
-          echo "[1/6] Deploy"
-          ./scripts/deploy-local.sh $IMAGE
-          DEPLOY_EXIT=$?
-
-          echo "[2/6] Health Check"
-          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1/board/hc || echo "500")
-
-          if [ "$STATUS" != "200" ] || [ $DEPLOY_EXIT -ne 0 ]; then
-            echo "❌ DEPLOY FAILED → ROLLBACK"
-
-            # 🚨 핵심 수정: promote 제거 → switch로 통일
-            "$MYAPP_INFRA_DIR/scripts/switch-board-upstream.sh" blue
-
-            docker rm -f myapp-board-green-1 myapp-board-green-2 || true
-
-            echo "✔ ROLLBACK COMPLETE"
-            exit 1
-          fi
-
-          echo "[3/6] Stabilization"
-          for i in {1..15}; do
-            sleep 2
-            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1/board/hc || echo "500")
-
-            if [ "$STATUS" != "200" ]; then
-              echo "❌ STABILIZATION FAILED → ROLLBACK"
-
-              "$MYAPP_INFRA_DIR/scripts/switch-board-upstream.sh" blue
-              docker rm -f myapp-board-green-1 myapp-board-green-2 || true
-
-              exit 1
-            fi
-
-            echo "OK $i/15"
-          done
-
-          echo "✔ SUCCESS DEPLOY"
+          chmod +x mvnw scripts/*.sh
+          ./scripts/deploy-local.sh

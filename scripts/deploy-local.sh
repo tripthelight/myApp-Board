@@ -42,11 +42,11 @@ if [ "$(docker inspect --format '{{.State.Running}}' "$NGINX_CONTAINER" 2>/dev/n
     exit 1
 fi
 
-SWITCH_SCRIPT="$MYAPP_INFRA_DIR/scripts/switch-board-upstream.sh"
+PROMOTE_SCRIPT="$INFRA_DIR/scripts/promote-board-upstream.sh"
 
-if [ ! -x "$SWITCH_SCRIPT" ]; then
-  echo "ERROR: switch script missing"
-  exit 1
+if [ ! -x "$PROMOTE_SCRIPT" ]; then
+    echo "Nginx promotion script is not executable: $PROMOTE_SCRIPT" >&2
+    exit 1
 fi
 
 loaded_config="$(docker exec "$NGINX_CONTAINER" nginx -T 2>&1)"
