@@ -4,6 +4,15 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      rollback_test:
+        description: Run a controlled failure after the Nginx switch
+        required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - after-switch
 
 concurrency:
   group: myapp-board-production
@@ -37,6 +46,7 @@ jobs:
 
       - name: Build and deploy without downtime
         id: deploy
+        continue-on-error: ${{ inputs.rollback_test == 'after-switch' }}
         env:
           IMAGE_NAME: myapp-board
           IMAGE_TAG: ${{ github.sha }}
@@ -45,9 +55,44 @@ jobs:
           DRAIN_SECONDS: '10'
           STABILIZATION_SECONDS: '30'
           CHECK_INTERVAL_SECONDS: '2'
+          ROLLBACK_TEST_AFTER_SWITCH: ${{ inputs.rollback_test == 'after-switch' }}
         run: |
           chmod +x mvnw scripts/*.sh
           ./scripts/deploy-local.sh
+
+      - name: Verify automatic rollback
+        id: rollback
+        if: always() && inputs.rollback_test == 'after-switch'
+        shell: bash
+        env:
+          PREVIOUS_COLOR: ${{ steps.deploy.outputs.previous_color }}
+          TARGET_COLOR: ${{ steps.deploy.outputs.target_color }}
+        run: |
+          if [ "${{ steps.deploy.outcome }}" != "failure" ]; then
+            echo "The controlled deployment unexpectedly succeeded." >&2
+            exit 1
+          fi
+
+          response=$(docker exec myapp-nginx \
+            wget -q -T 2 -O - http://127.0.0.1/board/hc)
+
+          if ! grep -Fq "\"env\":\"$PREVIOUS_COLOR\"" <<< "$response"; then
+            echo "Rollback verification failed: $response" >&2
+            exit 1
+          fi
+
+          running_target=$(docker ps \
+            --filter "name=myapp-board-$TARGET_COLOR-" \
+            --format '{{.Names}}')
+
+          if [ -n "$running_target" ]; then
+            echo "Failed target containers are still running:" >&2
+            echo "$running_target" >&2
+            exit 1
+          fi
+
+          echo "Automatic rollback verified: $TARGET_COLOR -> $PREVIOUS_COLOR"
+          echo "Proxy response: $response"
 
       - name: Write deployment summary
         if: always()
@@ -57,17 +102,27 @@ jobs:
           PREVIOUS_COLOR: ${{ steps.deploy.outputs.previous_color }}
           TARGET_COLOR: ${{ steps.deploy.outputs.target_color }}
           DEPLOY_LOG_FILE: ${{ steps.deploy.outputs.log_file }}
+          ROLLBACK_TEST: ${{ inputs.rollback_test }}
+          ROLLBACK_OUTCOME: ${{ steps.rollback.outcome }}
         run: |
+          DISPLAY_RESULT="${DEPLOY_STATUS:-FAILED}"
+          if [ "$ROLLBACK_TEST" = "after-switch" ] && [ "$ROLLBACK_OUTCOME" = "success" ]; then
+            DISPLAY_RESULT="ROLLBACK TEST PASSED"
+          fi
+
           {
             echo "## Board deployment"
             echo
             echo "| Item | Value |"
             echo "| --- | --- |"
-            echo "| Result | ${DEPLOY_STATUS:-FAILED} |"
+            echo "| Result | $DISPLAY_RESULT |"
             echo "| Commit | \`${GITHUB_SHA}\` |"
             echo "| Actor | \`${GITHUB_ACTOR}\` |"
             echo "| Transition | \`${PREVIOUS_COLOR:-unknown} -> ${TARGET_COLOR:-unknown}\` |"
             echo "| Server log | \`${DEPLOY_LOG_FILE:-not-created}\` |"
+            if [ "$ROLLBACK_TEST" = "after-switch" ]; then
+              echo "| Rollback test | \`${ROLLBACK_OUTCOME}\` |"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Send Slack deployment notification
@@ -81,13 +136,17 @@ jobs:
           TARGET_COLOR: ${{ steps.deploy.outputs.target_color }}
           DEPLOY_LOG_FILE: ${{ steps.deploy.outputs.log_file }}
           DEPLOY_OUTCOME: ${{ steps.deploy.outcome }}
+          ROLLBACK_TEST: ${{ inputs.rollback_test }}
+          ROLLBACK_OUTCOME: ${{ steps.rollback.outcome }}
         run: |
           if [ -z "$SLACK_WEBHOOK_URL" ]; then
             echo "SLACK_WEBHOOK_URL is not configured. Skipping Slack notification."
             exit 0
           fi
 
-          if [ "$DEPLOY_OUTCOME" = "success" ]; then
+          if [ "$ROLLBACK_TEST" = "after-switch" ] && [ "$ROLLBACK_OUTCOME" = "success" ]; then
+            RESULT="ROLLBACK TEST PASSED"
+          elif [ "$DEPLOY_OUTCOME" = "success" ]; then
             RESULT="SUCCESS"
           else
             RESULT="FAILED"

@@ -11,6 +11,7 @@ IMAGE_TAG="${IMAGE_TAG:-manual-$(date +%Y%m%d%H%M%S)}"
 DRAIN_SECONDS="${DRAIN_SECONDS:-10}"
 STABILIZATION_SECONDS="${STABILIZATION_SECONDS:-30}"
 CHECK_INTERVAL_SECONDS="${CHECK_INTERVAL_SECONDS:-2}"
+ROLLBACK_TEST_AFTER_SWITCH="${ROLLBACK_TEST_AFTER_SWITCH:-false}"
 DEPLOY_LOG_DIR="${DEPLOY_LOG_DIR:-$HOME/myapp-deploy-logs/board}"
 DEPLOY_STARTED_AT="$(date '+%Y-%m-%dT%H:%M:%S%z')"
 DEPLOY_RUN_ID="${GITHUB_RUN_ID:-manual}-$(date '+%Y%m%d-%H%M%S')"
@@ -94,6 +95,12 @@ if [[ ! "$STABILIZATION_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
     exit 1
 fi
 
+if [ "$ROLLBACK_TEST_AFTER_SWITCH" != true ] && \
+   [ "$ROLLBACK_TEST_AFTER_SWITCH" != false ]; then
+    echo "ROLLBACK_TEST_AFTER_SWITCH must be true or false." >&2
+    exit 1
+fi
+
 cleanup_on_error() {
     exit_code=$?
 
@@ -172,6 +179,7 @@ done
 echo "[5/8] Promote Nginx to $TARGET and stabilize"
 STABILIZATION_SECONDS="$STABILIZATION_SECONDS" \
 CHECK_INTERVAL_SECONDS="$CHECK_INTERVAL_SECONDS" \
+ROLLBACK_TEST_AFTER_SWITCH="$ROLLBACK_TEST_AFTER_SWITCH" \
     "$PROMOTE_SCRIPT" "$TARGET"
 SWITCHED=true
 
