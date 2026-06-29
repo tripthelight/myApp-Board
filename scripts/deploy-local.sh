@@ -37,7 +37,10 @@ if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
     exit 1
 fi
 
-if [ "$(docker inspect --format '{{.State.Running}}' "$NGINX_CONTAINER" 2>/dev/null || true)" != true ]; then
+if [ "$(docker inspect \
+    --format '{{.State.Running}}' \
+    "$NGINX_CONTAINER" 2>/dev/null || true)" != true ]; then
+
     echo "Nginx container is not running: $NGINX_CONTAINER" >&2
     exit 1
 fi
@@ -51,12 +54,18 @@ fi
 
 loaded_config="$(docker exec "$NGINX_CONTAINER" nginx -T 2>&1)"
 
-if grep -Fq 'server myapp-board-blue-1:8080' <<< "$loaded_config"; then
+if grep -Fq \
+    'server myapp-board-blue-1:8080' <<< "$loaded_config"; then
+
     CURRENT=blue
     TARGET=green
-elif grep -Fq 'server myapp-board-green-1:8080' <<< "$loaded_config"; then
+
+elif grep -Fq \
+    'server myapp-board-green-1:8080' <<< "$loaded_config"; then
+
     CURRENT=green
     TARGET=blue
+
 else
     echo "Could not determine the active Board color." >&2
     exit 1
@@ -65,9 +74,10 @@ fi
 TARGET_COMPOSE_FILE="$PROJECT_DIR/deploy/docker-compose-$TARGET.yml"
 SWITCHED=false
 
-if [[ ! "$STABILIZATION_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
+if [[ ! "$STABILIZATION_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
    [[ ! "$CHECK_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Stabilization and check interval values must be positive integers." >&2
+
+    echo "Stabilization values must be positive integers." >&2
     exit 1
 fi
 
@@ -75,13 +85,21 @@ cleanup_on_error() {
     exit_code=$?
 
     if [ "$exit_code" -eq 2 ]; then
-        echo "Infra rollback failed. Keeping both colors for investigation." >&2
+        echo "Infra rollback failed." >&2
+        echo "Keeping both colors for investigation." >&2
+
     elif [ "$SWITCHED" != true ]; then
-        echo "Deployment failed before the Nginx switch. Removing the $TARGET containers." >&2
-        IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" \
-            docker compose -f "$TARGET_COMPOSE_FILE" down || true
+        echo "Deployment failed before the Nginx switch." >&2
+        echo "Removing the $TARGET containers." >&2
+
+        IMAGE_NAME="$IMAGE_NAME" \
+        IMAGE_TAG="$IMAGE_TAG" \
+            docker compose \
+            -f "$TARGET_COMPOSE_FILE" down || true
+
     else
-        echo "Deployment failed after the Nginx switch. Both colors are being kept." >&2
+        echo "Deployment failed after the Nginx switch." >&2
+        echo "Both colors are being kept." >&2
     fi
 
     exit "$exit_code"
@@ -101,11 +119,18 @@ echo "[2/8] Build Docker image"
 docker build --tag "$IMAGE_NAME:$IMAGE_TAG" .
 
 echo "[3/8] Start two $TARGET containers"
+
 export IMAGE_NAME IMAGE_TAG
-docker compose -f "$TARGET_COMPOSE_FILE" config >/dev/null
-docker compose -f "$TARGET_COMPOSE_FILE" up -d --force-recreate
+
+docker compose \
+    -f "$TARGET_COMPOSE_FILE" config >/dev/null
+
+docker compose \
+    -f "$TARGET_COMPOSE_FILE" \
+    up -d --force-recreate
 
 echo "[4/8] Check both $TARGET containers"
+
 for instance in 1 2; do
     container="myapp-board-$TARGET-$instance"
     ready=false
@@ -113,8 +138,13 @@ for instance in 1 2; do
     for attempt in $(seq 1 30); do
         echo "Health check $container: $attempt/30"
 
-        if docker run --rm --network "$NETWORK_NAME" busybox:1.36 \
-            wget -q -T 2 -O /dev/null "http://$container:8080/hc"; then
+        if docker run \
+            --rm \
+            --network "$NETWORK_NAME" \
+            busybox:1.36 \
+            wget -q -T 2 -O /dev/null \
+            "http://$container:8080/hc"; then
+
             ready=true
             break
         fi
@@ -130,9 +160,11 @@ for instance in 1 2; do
 done
 
 echo "[5/8] Promote Nginx to $TARGET and stabilize"
+
 STABILIZATION_SECONDS="$STABILIZATION_SECONDS" \
 CHECK_INTERVAL_SECONDS="$CHECK_INTERVAL_SECONDS" \
     "$PROMOTE_SCRIPT" "$TARGET"
+
 SWITCHED=true
 
 echo "[6/8] Promotion verified by Infra"
@@ -141,13 +173,17 @@ echo "[7/8] Wait ${DRAIN_SECONDS}s before stopping $CURRENT"
 sleep "$DRAIN_SECONDS"
 
 echo "[8/8] Stop the inactive $CURRENT containers"
-IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" \
+
+IMAGE_NAME="$IMAGE_NAME" \
+IMAGE_TAG="$IMAGE_TAG" \
     "$PROJECT_DIR/scripts/stop-inactive-color.sh" "$CURRENT"
 
 trap - ERR
 
 echo
-docker ps --filter 'name=myapp-board-' \
+
+docker ps \
+    --filter 'name=myapp-board-' \
     --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
 
 echo
