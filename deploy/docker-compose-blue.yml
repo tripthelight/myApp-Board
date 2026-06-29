@@ -11,7 +11,6 @@ services:
       SERVER_NAME: board_blue_1
       DISPLAY_SERVER_ADDRESS: myapp-board-blue-1
       SERVER_PORT: 8080
-      FAIL_MODE: "true"
     expose:
       - "8080"
     networks:

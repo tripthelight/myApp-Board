@@ -8,7 +8,6 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.Map;
 import java.util.TreeMap;
 
-/*
 @RestController
 public class HealthCheckController {
     @Value("${server.env}")
@@ -38,27 +37,4 @@ public class HealthCheckController {
         return ResponseEntity.ok(env);
     }
 
-}
-*/
-
-
-@RestController
-public class HealthCheckController {
-
-    @Value("${fail.mode:false}")
-    private boolean failMode;
-
-    @GetMapping("/board/hc")
-    public Map<String, Object> hc() {
-
-        if (failMode) {
-            throw new RuntimeException("🔥 Forced Failure for Rollback Test");
-        }
-
-        return Map.of(
-                "env", "blue",
-                "serverName", "board_blue_1",
-                "status", "OK"
-        );
-    }
 }
