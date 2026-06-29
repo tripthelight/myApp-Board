@@ -1,48 +1,84 @@
-name: Build and blue-green deploy Board
+name: myApp Board CI/CD
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
-
-concurrency:
-  group: myapp-board-production
-  cancel-in-progress: false
-
-permissions:
-  contents: read
+    branches: [ "main" ]
 
 jobs:
   deploy:
-    runs-on: [self-hosted, Linux, X64, myapp-board]
-    timeout-minutes: 30
+    runs-on: self-hosted
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
 
-      - name: Set up Java 17
-        uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: '17'
-          cache: maven
+      - name: Set execute permission
+        run: chmod +x mvnw scripts/*.sh
 
-      - name: Verify deployment environment
+      - name: Build & Deploy
+        id: deploy
         run: |
-          docker version
-          docker compose version
-          docker network inspect myapp-network >/dev/null
-          docker inspect myapp-nginx >/dev/null
+          set +e
 
-      - name: Build and deploy without downtime
-        env:
-          IMAGE_NAME: myapp-board
-          IMAGE_TAG: ${{ github.sha }}
-          MYAPP_INFRA_DIR: /home/um/myApp-Infra
-          DRAIN_SECONDS: '10'
-          STABILIZATION_SECONDS: '30'
-          CHECK_INTERVAL_SECONDS: '2'
-        run: |
-          chmod +x mvnw scripts/*.sh
-          ./scripts/deploy-local.sh
+          echo "[1/8] Build Spring Boot application"
+          ./mvnw clean package -DskipTests
+          if [ $? -ne 0 ]; then
+            echo "BUILD FAILED"
+            exit 1
+          fi
+
+          echo "[2/8] Build Docker image"
+          IMAGE=myapp-board:${GITHUB_SHA}
+          docker build -t $IMAGE .
+
+          echo "[3/8] Start new containers (blue-green)"
+          ./scripts/deploy.sh $IMAGE
+
+          echo "[4/8] Health check"
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/board/hc || echo "500")
+
+          if [ "$STATUS" != "200" ]; then
+            echo "❌ HEALTH CHECK FAILED"
+
+            FAIL=1
+          else
+            echo "✔ HEALTH CHECK OK"
+            FAIL=0
+          fi
+
+          echo "[5/8] Stabilization check (30s)"
+          for i in {1..15}; do
+            sleep 2
+
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8080/board/hc || echo "FAIL")
+
+            if [ "$STATUS" != "200" ]; then
+              FAIL=1
+              break
+            fi
+
+            echo "Stabilization check $i/15: OK"
+          done
+
+          echo "[6/8] DECISION PHASE"
+
+          if [ "$FAIL" -eq 1 ]; then
+            echo "🔥 FAILURE DETECTED → START ROLLBACK"
+
+            # ===== ROLLBACK LOGIC =====
+            ./scripts/switch-board-upstream.sh blue
+
+            docker rm -f myapp-board-green-1 || true
+            docker rm -f myapp-board-green-2 || true
+
+            echo "✔ ROLLBACK COMPLETE"
+
+            echo "❌ FAIL END"
+            exit 1
+          fi
+
+          echo "[7/8] Commit new version active"
+
+          ./scripts/cleanup-old.sh
+
+          echo "[8/8] SUCCESS DEPLOY COMPLETE"
