@@ -42,10 +42,10 @@ if [ "$(docker inspect --format '{{.State.Running}}' "$NGINX_CONTAINER" 2>/dev/n
     exit 1
 fi
 
-SWITCH_SCRIPT="$INFRA_DIR/scripts/switch-board-upstream.sh"
+PROMOTE_SCRIPT="$INFRA_DIR/scripts/promote-board-upstream.sh"
 
-if [ ! -x "$SWITCH_SCRIPT" ]; then
-    echo "Nginx switch script is not executable: $SWITCH_SCRIPT" >&2
+if [ ! -x "$PROMOTE_SCRIPT" ]; then
+    echo "Nginx promotion script is not executable: $PROMOTE_SCRIPT" >&2
     exit 1
 fi
 
@@ -74,7 +74,9 @@ fi
 cleanup_on_error() {
     exit_code=$?
 
-    if [ "$SWITCHED" != true ]; then
+    if [ "$exit_code" -eq 2 ]; then
+        echo "Infra rollback failed. Keeping both colors for investigation." >&2
+    elif [ "$SWITCHED" != true ]; then
         echo "Deployment failed before the Nginx switch. Removing the $TARGET containers." >&2
         IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" \
             docker compose -f "$TARGET_COMPOSE_FILE" down || true
@@ -86,24 +88,6 @@ cleanup_on_error() {
 }
 
 trap cleanup_on_error ERR
-
-rollback_after_switch() {
-    reason="$1"
-    echo "Post-switch verification failed: $reason" >&2
-    echo "Rolling Nginx back to $CURRENT." >&2
-
-    if "$SWITCH_SCRIPT" "$CURRENT"; then
-        SWITCHED=false
-        IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" \
-            docker compose -f "$TARGET_COMPOSE_FILE" down || true
-        echo "Automatic rollback complete: $TARGET -> $CURRENT" >&2
-    else
-        echo "Automatic rollback failed. Keeping both colors for investigation." >&2
-    fi
-
-    trap - ERR
-    exit 1
-}
 
 cd "$PROJECT_DIR"
 
@@ -145,35 +129,13 @@ for instance in 1 2; do
     fi
 done
 
-echo "[5/8] Switch Nginx to $TARGET"
-"$SWITCH_SCRIPT" "$TARGET"
+echo "[5/8] Promote Nginx to $TARGET and stabilize"
+STABILIZATION_SECONDS="$STABILIZATION_SECONDS" \
+CHECK_INTERVAL_SECONDS="$CHECK_INTERVAL_SECONDS" \
+    "$PROMOTE_SCRIPT" "$TARGET"
 SWITCHED=true
 
-echo "[6/8] Stabilize $TARGET for ${STABILIZATION_SECONDS}s"
-stabilization_checks=$((
-    (STABILIZATION_SECONDS + CHECK_INTERVAL_SECONDS - 1) / CHECK_INTERVAL_SECONDS
-))
-
-for check in $(seq 1 "$stabilization_checks"); do
-    for instance in 1 2; do
-        container="myapp-board-$TARGET-$instance"
-
-        if ! docker exec "$NGINX_CONTAINER" \
-            wget -q -T 2 -O /dev/null "http://$container:8080/hc"; then
-            rollback_after_switch "$container failed its direct health check"
-        fi
-    done
-
-    proxy_response="$(docker exec "$NGINX_CONTAINER" \
-        wget -q -T 2 -O - http://127.0.0.1/board/hc || true)"
-
-    if ! grep -Fq "\"env\":\"$TARGET\"" <<< "$proxy_response"; then
-        rollback_after_switch "unexpected Board proxy response: $proxy_response"
-    fi
-
-    echo "Stabilization check $check/$stabilization_checks: OK"
-    sleep "$CHECK_INTERVAL_SECONDS"
-done
+echo "[6/8] Promotion verified by Infra"
 
 echo "[7/8] Wait ${DRAIN_SECONDS}s before stopping $CURRENT"
 sleep "$DRAIN_SECONDS"
