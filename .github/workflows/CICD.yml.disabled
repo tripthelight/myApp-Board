@@ -1,0 +1,203 @@
+name: Build and blue-green deploy
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/zero-downtime-deployment
+  DEPLOY_DIR: /home/um/zero-downtime
+  NGINX_CONTAINER: nginx
+
+jobs:
+  build-and-deploy:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+
+      - name: Test and package
+        run: |
+          chmod +x mvnw
+          ./mvnw --batch-mode --errors clean package
+
+      - name: Print test failure reports
+        if: failure()
+        run: |
+          echo '===== Surefire test reports ====='
+          find target/surefire-reports -maxdepth 1 -type f \
+            \( -name '*.txt' -o -name '*.dumpstream' \) \
+            -print -exec sed -n '1,240p' {} \; 2>/dev/null || true
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push image
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker build -t "${IMAGE_NAME}:${IMAGE_TAG}" .
+          docker push "${IMAGE_NAME}:${IMAGE_TAG}"
+
+      - name: Deploy without downtime
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -Eeuo pipefail
+
+          cd "$DEPLOY_DIR"
+          test -f docker-compose-blue.yml
+          test -f docker-compose-green.yml
+          test -f nginx/default.conf
+          docker network inspect zzd-network >/dev/null 2>&1 || \
+            docker network create zzd-network
+          docker inspect "$NGINX_CONTAINER" >/dev/null
+          if ! docker inspect \
+            --format '{{json .NetworkSettings.Networks}}' "$NGINX_CONTAINER" \
+            | grep -q '"zzd-network"'; then
+            docker network connect zzd-network "$NGINX_CONTAINER"
+          fi
+
+          if [ -f nginx/default.conf ] && \
+             grep -Fq 'server zzd-blue-1:8080' nginx/default.conf; then
+            CURRENT=blue
+            TARGET=green
+          elif [ -f nginx/default.conf ] && \
+               grep -Fq 'server zzd-green-1:8080' nginx/default.conf; then
+            CURRENT=green
+            TARGET=blue
+          elif docker ps --format '{{.Names}}' | grep -Eq '^zzd-blue-[12]$'; then
+            CURRENT=blue
+            TARGET=green
+          elif docker ps --format '{{.Names}}' | grep -Eq '^zzd-green-[12]$'; then
+            CURRENT=green
+            TARGET=blue
+          else
+            CURRENT=none
+            TARGET=blue
+          fi
+
+          export IMAGE_NAME IMAGE_TAG
+          docker compose -f "docker-compose-${TARGET}.yml" pull
+          docker compose -f "docker-compose-${TARGET}.yml" up -d --force-recreate
+
+          for instance in 1 2; do
+            CONTAINER="zzd-${TARGET}-${instance}"
+            READY=false
+
+            for attempt in $(seq 1 30); do
+              echo "Health check ${CONTAINER}: ${attempt}/30"
+              if docker exec "$NGINX_CONTAINER" wget -q -T 2 -O /dev/null \
+                "http://${CONTAINER}:8080/hc"; then
+                READY=true
+                break
+              fi
+              sleep 2
+            done
+
+            if [ "$READY" != true ]; then
+              docker logs "$CONTAINER" || true
+              docker compose -f "docker-compose-${TARGET}.yml" down
+              echo "${CONTAINER} did not become ready. Keeping ${CURRENT} servers."
+              exit 1
+            fi
+          done
+
+          if [ -f nginx/default.conf ]; then
+            cp nginx/default.conf nginx/default.conf.backup
+          fi
+          cat > nginx/default.conf.next <<'NGINX_CONFIG'
+          upstream backend_pool {
+              least_conn;
+              server zzd-__TARGET_COLOR__-1:8080 max_fails=3 fail_timeout=10s;
+              server zzd-__TARGET_COLOR__-2:8080 max_fails=3 fail_timeout=10s;
+              keepalive 32;
+          }
+
+          server {
+              listen 80;
+              server_name _;
+
+              location / {
+                  proxy_pass http://backend_pool;
+                  proxy_http_version 1.1;
+                  proxy_set_header Connection "";
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+                  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                  proxy_set_header X-Forwarded-Proto $scheme;
+                  proxy_connect_timeout 3s;
+                  proxy_read_timeout 60s;
+              }
+          }
+          NGINX_CONFIG
+          sed -i "s/__TARGET_COLOR__/${TARGET}/g" nginx/default.conf.next
+          cat nginx/default.conf.next > nginx/default.conf
+          rm -f nginx/default.conf.next
+
+          if ! docker exec "$NGINX_CONTAINER" nginx -t; then
+            if [ -f nginx/default.conf.backup ]; then
+              cat nginx/default.conf.backup > nginx/default.conf
+            fi
+            docker compose -f "docker-compose-${TARGET}.yml" down
+            echo "Nginx configuration is invalid. Keeping ${CURRENT} server."
+            exit 1
+          fi
+          docker exec "$NGINX_CONTAINER" nginx -s reload
+
+          LOADED_NGINX_CONFIG=$(docker exec "$NGINX_CONTAINER" nginx -T 2>&1)
+          if ! grep -Fq "server zzd-${TARGET}-1:8080" <<< "$LOADED_NGINX_CONFIG" || \
+             ! grep -Fq "server zzd-${TARGET}-2:8080" <<< "$LOADED_NGINX_CONFIG"; then
+            if [ -f nginx/default.conf.backup ]; then
+              cat nginx/default.conf.backup > nginx/default.conf
+            fi
+            docker exec "$NGINX_CONTAINER" nginx -t
+            docker exec "$NGINX_CONTAINER" nginx -s reload
+            docker compose -f "docker-compose-${TARGET}.yml" down
+            echo "Nginx did not load the ${TARGET} upstream. Keeping ${CURRENT} server."
+            exit 1
+          fi
+
+          if ! docker exec "$NGINX_CONTAINER" \
+            wget -q -O /dev/null http://127.0.0.1/hc; then
+            if [ -f nginx/default.conf.backup ]; then
+              cat nginx/default.conf.backup > nginx/default.conf
+            fi
+            docker exec "$NGINX_CONTAINER" nginx -t
+            docker exec "$NGINX_CONTAINER" nginx -s reload
+            docker compose -f "docker-compose-${TARGET}.yml" down
+            echo "Nginx proxy health check failed. Keeping ${CURRENT} server."
+            exit 1
+          fi
+
+          rm -f nginx/default.conf.backup
+
+          if [ "$CURRENT" != none ]; then
+            sleep 10
+            docker compose -f "docker-compose-${CURRENT}.yml" down
+          fi
+
+          # Remove containers left by the former single-instance deployment.
+          docker rm -f zzd-blue zzd-green 2>/dev/null || true
+
+          docker image prune -f
+          echo "Deployment complete: ${CURRENT} -> ${TARGET}"
