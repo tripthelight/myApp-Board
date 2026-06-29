@@ -88,6 +88,7 @@ fi
 
 TARGET_COMPOSE_FILE="$PROJECT_DIR/deploy/docker-compose-$TARGET.yml"
 SWITCHED=false
+FAULT_INJECTOR_PID=""
 
 if [[ ! "$STABILIZATION_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
    [[ ! "$CHECK_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
@@ -105,6 +106,12 @@ cleanup_on_error() {
     exit_code=$?
 
     trap - ERR
+
+    if [ -n "$FAULT_INJECTOR_PID" ]; then
+        kill "$FAULT_INJECTOR_PID" >/dev/null 2>&1 || true
+        wait "$FAULT_INJECTOR_PID" 2>/dev/null || true
+    fi
+
     echo "Deployment failed with exit code $exit_code." >&2
 
     for instance in 1 2; do
@@ -176,12 +183,49 @@ for instance in 1 2; do
     fi
 done
 
+if [ "$ROLLBACK_TEST_AFTER_SWITCH" = true ]; then
+    echo "[ROLLBACK TEST] Waiting for Nginx to switch to $TARGET."
+
+    (
+        trap - ERR
+
+        for attempt in $(seq 1 150); do
+            nginx_config="$(docker exec "$NGINX_CONTAINER" nginx -T 2>&1 || true)"
+
+            if grep -Fq "server myapp-board-$TARGET-1:8080" <<< "$nginx_config"; then
+                echo "[ROLLBACK TEST] Nginx switched to $TARGET."
+                echo "[ROLLBACK TEST] Stopping myapp-board-$TARGET-1."
+                docker stop "myapp-board-$TARGET-1" >/dev/null
+                exit 0
+            fi
+
+            sleep 0.2
+        done
+
+        echo "[ROLLBACK TEST] Nginx switch was not detected in time." >&2
+        exit 0
+    ) &
+
+    FAULT_INJECTOR_PID=$!
+fi
+
 echo "[5/8] Promote Nginx to $TARGET and stabilize"
 STABILIZATION_SECONDS="$STABILIZATION_SECONDS" \
 CHECK_INTERVAL_SECONDS="$CHECK_INTERVAL_SECONDS" \
-ROLLBACK_TEST_AFTER_SWITCH="$ROLLBACK_TEST_AFTER_SWITCH" \
     "$PROMOTE_SCRIPT" "$TARGET"
 SWITCHED=true
+
+if [ "$ROLLBACK_TEST_AFTER_SWITCH" = true ]; then
+    wait "$FAULT_INJECTOR_PID" || true
+    FAULT_INJECTOR_PID=""
+
+    echo "[ROLLBACK TEST] Deployment unexpectedly stabilized. Restoring $CURRENT." >&2
+    STABILIZATION_SECONDS="$STABILIZATION_SECONDS" \
+    CHECK_INTERVAL_SECONDS="$CHECK_INTERVAL_SECONDS" \
+        "$PROMOTE_SCRIPT" "$CURRENT"
+    SWITCHED=false
+    false
+fi
 
 echo "[6/8] Promotion verified by Infra"
 
