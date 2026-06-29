@@ -9,6 +9,8 @@ NETWORK_NAME="myapp-network"
 IMAGE_NAME="${IMAGE_NAME:-myapp-board}"
 IMAGE_TAG="${IMAGE_TAG:-manual-$(date +%Y%m%d%H%M%S)}"
 DRAIN_SECONDS="${DRAIN_SECONDS:-10}"
+STABILIZATION_SECONDS="${STABILIZATION_SECONDS:-30}"
+CHECK_INTERVAL_SECONDS="${CHECK_INTERVAL_SECONDS:-2}"
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -63,6 +65,12 @@ fi
 TARGET_COMPOSE_FILE="$PROJECT_DIR/deploy/docker-compose-$TARGET.yml"
 SWITCHED=false
 
+if [[ ! "$STABILIZATION_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
+   [[ ! "$CHECK_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Stabilization and check interval values must be positive integers." >&2
+    exit 1
+fi
+
 cleanup_on_error() {
     exit_code=$?
 
@@ -79,23 +87,41 @@ cleanup_on_error() {
 
 trap cleanup_on_error ERR
 
+rollback_after_switch() {
+    reason="$1"
+    echo "Post-switch verification failed: $reason" >&2
+    echo "Rolling Nginx back to $CURRENT." >&2
+
+    if "$SWITCH_SCRIPT" "$CURRENT"; then
+        SWITCHED=false
+        IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" \
+            docker compose -f "$TARGET_COMPOSE_FILE" down || true
+        echo "Automatic rollback complete: $TARGET -> $CURRENT" >&2
+    else
+        echo "Automatic rollback failed. Keeping both colors for investigation." >&2
+    fi
+
+    trap - ERR
+    exit 1
+}
+
 cd "$PROJECT_DIR"
 
 echo "Deployment plan: $CURRENT -> $TARGET"
 echo "Docker image: $IMAGE_NAME:$IMAGE_TAG"
 
-echo "[1/7] Build Spring Boot application"
+echo "[1/8] Build Spring Boot application"
 ./mvnw --batch-mode --errors clean package
 
-echo "[2/7] Build Docker image"
+echo "[2/8] Build Docker image"
 docker build --tag "$IMAGE_NAME:$IMAGE_TAG" .
 
-echo "[3/7] Start two $TARGET containers"
+echo "[3/8] Start two $TARGET containers"
 export IMAGE_NAME IMAGE_TAG
 docker compose -f "$TARGET_COMPOSE_FILE" config >/dev/null
 docker compose -f "$TARGET_COMPOSE_FILE" up -d --force-recreate
 
-echo "[4/7] Check both $TARGET containers"
+echo "[4/8] Check both $TARGET containers"
 for instance in 1 2; do
     container="myapp-board-$TARGET-$instance"
     ready=false
@@ -119,14 +145,40 @@ for instance in 1 2; do
     fi
 done
 
-echo "[5/7] Switch Nginx to $TARGET"
+echo "[5/8] Switch Nginx to $TARGET"
 "$SWITCH_SCRIPT" "$TARGET"
 SWITCHED=true
 
-echo "[6/7] Wait ${DRAIN_SECONDS}s before stopping $CURRENT"
+echo "[6/8] Stabilize $TARGET for ${STABILIZATION_SECONDS}s"
+stabilization_checks=$((
+    (STABILIZATION_SECONDS + CHECK_INTERVAL_SECONDS - 1) / CHECK_INTERVAL_SECONDS
+))
+
+for check in $(seq 1 "$stabilization_checks"); do
+    for instance in 1 2; do
+        container="myapp-board-$TARGET-$instance"
+
+        if ! docker exec "$NGINX_CONTAINER" \
+            wget -q -T 2 -O /dev/null "http://$container:8080/hc"; then
+            rollback_after_switch "$container failed its direct health check"
+        fi
+    done
+
+    proxy_response="$(docker exec "$NGINX_CONTAINER" \
+        wget -q -T 2 -O - http://127.0.0.1/board/hc || true)"
+
+    if ! grep -Fq "\"env\":\"$TARGET\"" <<< "$proxy_response"; then
+        rollback_after_switch "unexpected Board proxy response: $proxy_response"
+    fi
+
+    echo "Stabilization check $check/$stabilization_checks: OK"
+    sleep "$CHECK_INTERVAL_SECONDS"
+done
+
+echo "[7/8] Wait ${DRAIN_SECONDS}s before stopping $CURRENT"
 sleep "$DRAIN_SECONDS"
 
-echo "[7/7] Stop the inactive $CURRENT containers"
+echo "[8/8] Stop the inactive $CURRENT containers"
 IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" \
     "$PROJECT_DIR/scripts/stop-inactive-color.sh" "$CURRENT"
 
