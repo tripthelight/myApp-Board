@@ -36,13 +36,45 @@ jobs:
           docker inspect myapp-nginx >/dev/null
 
       - name: Build and deploy without downtime
+        id: deploy
         env:
           IMAGE_NAME: myapp-board
           IMAGE_TAG: ${{ github.sha }}
           MYAPP_INFRA_DIR: /home/um/myApp-Infra
+          DEPLOY_LOG_DIR: /home/um/myapp-deploy-logs/board
           DRAIN_SECONDS: '10'
           STABILIZATION_SECONDS: '30'
           CHECK_INTERVAL_SECONDS: '2'
         run: |
           chmod +x mvnw scripts/*.sh
           ./scripts/deploy-local.sh
+
+      - name: Write deployment summary
+        if: always()
+        shell: bash
+        env:
+          DEPLOY_STATUS: ${{ steps.deploy.outputs.deployment_status }}
+          PREVIOUS_COLOR: ${{ steps.deploy.outputs.previous_color }}
+          TARGET_COLOR: ${{ steps.deploy.outputs.target_color }}
+          DEPLOY_LOG_FILE: ${{ steps.deploy.outputs.log_file }}
+        run: |
+          {
+            echo "## Board deployment"
+            echo
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Result | ${DEPLOY_STATUS:-FAILED} |"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+            echo "| Actor | \`${GITHUB_ACTOR}\` |"
+            echo "| Transition | \`${PREVIOUS_COLOR:-unknown} -> ${TARGET_COLOR:-unknown}\` |"
+            echo "| Server log | \`${DEPLOY_LOG_FILE:-not-created}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload deployment log
+        if: always() && steps.deploy.outputs.log_file != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: board-deploy-log-${{ github.run_id }}
+          path: ${{ steps.deploy.outputs.log_file }}
+          if-no-files-found: warn
+          retention-days: 30

@@ -11,6 +11,29 @@ IMAGE_TAG="${IMAGE_TAG:-manual-$(date +%Y%m%d%H%M%S)}"
 DRAIN_SECONDS="${DRAIN_SECONDS:-10}"
 STABILIZATION_SECONDS="${STABILIZATION_SECONDS:-30}"
 CHECK_INTERVAL_SECONDS="${CHECK_INTERVAL_SECONDS:-2}"
+DEPLOY_LOG_DIR="${DEPLOY_LOG_DIR:-$HOME/myapp-deploy-logs/board}"
+DEPLOY_STARTED_AT="$(date '+%Y-%m-%dT%H:%M:%S%z')"
+DEPLOY_RUN_ID="${GITHUB_RUN_ID:-manual}-$(date '+%Y%m%d-%H%M%S')"
+
+mkdir -p "$DEPLOY_LOG_DIR"
+LOG_FILE="$DEPLOY_LOG_DIR/deploy-$DEPLOY_RUN_ID.log"
+HISTORY_FILE="$DEPLOY_LOG_DIR/deployment-history.tsv"
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+write_action_output() {
+    if [ -n "${GITHUB_OUTPUT:-}" ]; then
+        printf '%s=%s\n' "$1" "$2" >> "$GITHUB_OUTPUT"
+    fi
+}
+
+record_history() {
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$DEPLOY_STARTED_AT" "$1" "$IMAGE_TAG" \
+        "${CURRENT:-unknown}" "${TARGET:-unknown}" "${GITHUB_ACTOR:-manual}" \
+        >> "$HISTORY_FILE"
+}
+
+write_action_output log_file "$LOG_FILE"
 
 require_command() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -74,6 +97,17 @@ fi
 cleanup_on_error() {
     exit_code=$?
 
+    trap - ERR
+    echo "Deployment failed with exit code $exit_code." >&2
+
+    for instance in 1 2; do
+        container="myapp-board-${TARGET:-unknown}-$instance"
+        if docker inspect "$container" >/dev/null 2>&1; then
+            echo "----- Last 200 log lines: $container -----" >&2
+            docker logs --tail 200 "$container" 2>&1 || true
+        fi
+    done
+
     if [ "$exit_code" -eq 2 ]; then
         echo "Infra rollback failed. Keeping both colors for investigation." >&2
     elif [ "$SWITCHED" != true ]; then
@@ -84,6 +118,11 @@ cleanup_on_error() {
         echo "Deployment failed after the Nginx switch. Both colors are being kept." >&2
     fi
 
+    record_history FAILED
+    write_action_output deployment_status FAILED
+    write_action_output previous_color "${CURRENT:-unknown}"
+    write_action_output target_color "${TARGET:-unknown}"
+
     exit "$exit_code"
 }
 
@@ -93,6 +132,7 @@ cd "$PROJECT_DIR"
 
 echo "Deployment plan: $CURRENT -> $TARGET"
 echo "Docker image: $IMAGE_NAME:$IMAGE_TAG"
+echo "Deployment log: $LOG_FILE"
 
 echo "[1/8] Build Spring Boot application"
 ./mvnw --batch-mode --errors clean package
@@ -146,9 +186,15 @@ IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" \
 
 trap - ERR
 
+record_history SUCCESS
+write_action_output deployment_status SUCCESS
+write_action_output previous_color "$CURRENT"
+write_action_output target_color "$TARGET"
+
 echo
 docker ps --filter 'name=myapp-board-' \
     --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
 
 echo
 echo "Deployment complete: $CURRENT -> $TARGET"
+echo "Deployment history: $HISTORY_FILE"
