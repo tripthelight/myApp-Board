@@ -1,144 +1,154 @@
 #!/usr/bin/env bash
-set -e
 
-############################################
-# CONFIG
-############################################
-APP_NAME="myapp-board"
+set -Eeuo pipefail
 
-BLUE_PORT=9090
-GREEN_PORT=9091
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+INFRA_DIR="${MYAPP_INFRA_DIR:-$HOME/myApp-Infra}"
+NGINX_CONTAINER="myapp-nginx"
+NETWORK_NAME="myapp-network"
+IMAGE_NAME="${IMAGE_NAME:-myapp-board}"
+IMAGE_TAG="${IMAGE_TAG:-manual-$(date +%Y%m%d%H%M%S)}"
+DRAIN_SECONDS="${DRAIN_SECONDS:-10}"
+STABILIZATION_SECONDS="${STABILIZATION_SECONDS:-30}"
+CHECK_INTERVAL_SECONDS="${CHECK_INTERVAL_SECONDS:-2}"
 
-HEALTH_ENDPOINT="/env"
-HEALTH_CHECK_TIMEOUT=60
-HEALTH_INTERVAL=2
+require_command() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "Required command not found: $1" >&2
+        exit 1
+    fi
+}
 
-NGINX_UPSTREAM_FILE="/etc/nginx/conf.d/upstream.conf"
+require_command docker
+require_command java
 
-############################################
-# STATE DETECT
-############################################
-echo "🔍 현재 상태 확인 중..."
-
-CURRENT_UPSTREAM=$(curl -s http://localhost${HEALTH_ENDPOINT} || echo "blue")
-
-if [[ "$CURRENT_UPSTREAM" == "blue" ]]; then
-  ACTIVE_PORT=$BLUE_PORT
-  STANDBY_PORT=$GREEN_PORT
-  TARGET="green"
-  PREVIOUS="blue"
-else
-  ACTIVE_PORT=$GREEN_PORT
-  STANDBY_PORT=$BLUE_PORT
-  TARGET="blue"
-  PREVIOUS="green"
+if ! docker info >/dev/null 2>&1; then
+    echo "Docker is not running or the current user cannot access it." >&2
+    exit 1
 fi
 
-echo "👉 ACTIVE: $PREVIOUS ($ACTIVE_PORT)"
-echo "👉 DEPLOY TARGET: $TARGET ($STANDBY_PORT)"
+if ! docker compose version >/dev/null 2>&1; then
+    echo "Docker Compose v2 is not available." >&2
+    exit 1
+fi
 
-############################################
-# BUILD
-############################################
-echo "📦 빌드..."
-./mvnw clean package -DskipTests
+if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
+    echo "Docker network does not exist: $NETWORK_NAME" >&2
+    exit 1
+fi
 
-JAR_FILE=$(ls target/*.jar | head -n 1)
+if [ "$(docker inspect --format '{{.State.Running}}' "$NGINX_CONTAINER" 2>/dev/null || true)" != true ]; then
+    echo "Nginx container is not running: $NGINX_CONTAINER" >&2
+    exit 1
+fi
 
-############################################
-# STOP STANDBY
-############################################
-echo "🧹 기존 standby 정리..."
-fuser -k ${STANDBY_PORT}/tcp || true
+PROMOTE_SCRIPT="$INFRA_DIR/scripts/promote-board-upstream.sh"
 
-############################################
-# START NEW VERSION
-############################################
-echo "🚀 ${TARGET} 실행..."
+if [ ! -x "$PROMOTE_SCRIPT" ]; then
+    echo "Nginx promotion script is not executable: $PROMOTE_SCRIPT" >&2
+    exit 1
+fi
 
-nohup java -jar \
-  -Dserver.port=${STANDBY_PORT} \
-  -Dspring.profiles.active=${TARGET} \
-  ${JAR_FILE} > ${TARGET}.log 2>&1 &
+loaded_config="$(docker exec "$NGINX_CONTAINER" nginx -T 2>&1)"
 
-NEW_PID=$!
+if grep -Fq 'server myapp-board-blue-1:8080' <<< "$loaded_config"; then
+    CURRENT=blue
+    TARGET=green
+elif grep -Fq 'server myapp-board-green-1:8080' <<< "$loaded_config"; then
+    CURRENT=green
+    TARGET=blue
+else
+    echo "Could not determine the active Board color." >&2
+    exit 1
+fi
 
-echo "PID: $NEW_PID"
+TARGET_COMPOSE_FILE="$PROJECT_DIR/deploy/docker-compose-$TARGET.yml"
+SWITCHED=false
 
-############################################
-# HEALTH CHECK
-############################################
-echo "⏳ Health Check 시작..."
+if [[ ! "$STABILIZATION_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
+   [[ ! "$CHECK_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Stabilization and check interval values must be positive integers." >&2
+    exit 1
+fi
 
-START_TIME=$(date +%s)
-HEALTH_OK=false
+cleanup_on_error() {
+    exit_code=$?
 
-while true; do
-  STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-    http://localhost:${STANDBY_PORT}${HEALTH_ENDPOINT} || true)
+    if [ "$exit_code" -eq 2 ]; then
+        echo "Infra rollback failed. Keeping both colors for investigation." >&2
+    elif [ "$SWITCHED" != true ]; then
+        echo "Deployment failed before the Nginx switch. Removing the $TARGET containers." >&2
+        IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" \
+            docker compose -f "$TARGET_COMPOSE_FILE" down || true
+    else
+        echo "Deployment failed after the Nginx switch. Both colors are being kept." >&2
+    fi
 
-  if [[ "$STATUS" == "200" ]]; then
-    HEALTH_OK=true
-    echo "✅ Health Check 성공!"
-    break
-  fi
+    exit "$exit_code"
+}
 
-  NOW=$(date +%s)
-  ELAPSED=$((NOW - START_TIME))
+trap cleanup_on_error ERR
 
-  if [[ $ELAPSED -gt $HEALTH_CHECK_TIMEOUT ]]; then
-    echo "❌ Health Check 실패 (timeout)"
-    break
-  fi
+cd "$PROJECT_DIR"
 
-  echo "⏳ 대기 중... (${ELAPSED}s)"
-  sleep $HEALTH_INTERVAL
+echo "Deployment plan: $CURRENT -> $TARGET"
+echo "Docker image: $IMAGE_NAME:$IMAGE_TAG"
+
+echo "[1/8] Build Spring Boot application"
+./mvnw --batch-mode --errors clean package
+
+echo "[2/8] Build Docker image"
+docker build --tag "$IMAGE_NAME:$IMAGE_TAG" .
+
+echo "[3/8] Start two $TARGET containers"
+export IMAGE_NAME IMAGE_TAG
+docker compose -f "$TARGET_COMPOSE_FILE" config >/dev/null
+docker compose -f "$TARGET_COMPOSE_FILE" up -d --force-recreate
+
+echo "[4/8] Check both $TARGET containers"
+for instance in 1 2; do
+    container="myapp-board-$TARGET-$instance"
+    ready=false
+
+    for attempt in $(seq 1 30); do
+        echo "Health check $container: $attempt/30"
+
+        if docker run --rm --network "$NETWORK_NAME" busybox:1.36 \
+            wget -q -T 2 -O /dev/null "http://$container:8080/hc"; then
+            ready=true
+            break
+        fi
+
+        sleep 2
+    done
+
+    if [ "$ready" != true ]; then
+        docker logs "$container" || true
+        echo "Health check failed: $container" >&2
+        false
+    fi
 done
 
-############################################
-# FAIL → ROLLBACK
-############################################
-if [[ "$HEALTH_OK" != true ]]; then
+echo "[5/8] Promote Nginx to $TARGET and stabilize"
+STABILIZATION_SECONDS="$STABILIZATION_SECONDS" \
+CHECK_INTERVAL_SECONDS="$CHECK_INTERVAL_SECONDS" \
+    "$PROMOTE_SCRIPT" "$TARGET"
+SWITCHED=true
 
-  echo "🚨 배포 실패 → 자동 롤백 시작"
+echo "[6/8] Promotion verified by Infra"
 
-  # 1. 신규 프로세스 종료
-  kill -9 $NEW_PID || true
+echo "[7/8] Wait ${DRAIN_SECONDS}s before stopping $CURRENT"
+sleep "$DRAIN_SECONDS"
 
-  # 2. 기존 upstream 유지 (아무것도 안 바꿈)
-  echo "🔒 기존 서비스 유지 (롤백 완료)"
+echo "[8/8] Stop the inactive $CURRENT containers"
+IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" \
+    "$PROJECT_DIR/scripts/stop-inactive-color.sh" "$CURRENT"
 
-  exit 1
-fi
+trap - ERR
 
-############################################
-# SUCCESS → SWITCH TRAFFIC
-############################################
-echo "🔀 트래픽 전환..."
+echo
+docker ps --filter 'name=myapp-board-' \
+    --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
 
-cat <<EOF > /tmp/upstream.conf
-upstream myapp {
-    server 127.0.0.1:${STANDBY_PORT};
-}
-EOF
-
-sudo cp /tmp/upstream.conf ${NGINX_UPSTREAM_FILE}
-sudo nginx -s reload
-
-echo "✅ Nginx 전환 완료 → ${TARGET}"
-
-############################################
-# SAFE GRACE SHUTDOWN OLD
-############################################
-echo "⏳ 기존 서버 종료 대기..."
-sleep 10
-
-echo "🧹 기존 서버 종료"
-
-fuser -k ${ACTIVE_PORT}/tcp || true
-
-############################################
-# FINAL STATE CHECK
-############################################
-echo "🎉 배포 성공!"
-echo "ACTIVE: ${TARGET} (${STANDBY_PORT})"
+echo
+echo "Deployment complete: $CURRENT -> $TARGET"
