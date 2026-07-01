@@ -1,0 +1,14 @@
+name: Deploy Board Local
+
+on:
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Deploy board with local blue green script
+        run: |
+          cd /home/um/myApp-Infra
+          ./scripts/deploy-board.sh
