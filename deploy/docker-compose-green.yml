@@ -11,6 +11,7 @@ services:
       SERVER_NAME: board_green_1
       DISPLAY_SERVER_ADDRESS: myapp-board-green-1
       SERVER_PORT: 8080
+      BOARD_DB_PASSWORD: ${BOARD_DB_PASSWORD:?BOARD_DB_PASSWORD is required}
     expose:
       - "8080"
     networks:
@@ -26,6 +27,7 @@ services:
       SERVER_NAME: board_green_2
       DISPLAY_SERVER_ADDRESS: myapp-board-green-2
       SERVER_PORT: 8080
+      BOARD_DB_PASSWORD: ${BOARD_DB_PASSWORD:?BOARD_DB_PASSWORD is required}
     expose:
       - "8080"
     networks:
