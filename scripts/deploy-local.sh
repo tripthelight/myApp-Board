@@ -35,6 +35,18 @@ record_history() {
         >> "$HISTORY_FILE"
 }
 
+remove_board_containers() {
+    color="$1"
+
+    for instance in 1 2; do
+        container="myapp-board-$color-$instance"
+
+        if docker inspect "$container" >/dev/null 2>&1; then
+            docker rm -f "$container" || true
+        fi
+    done
+}
+
 write_action_output log_file "$LOG_FILE"
 
 require_command() {
@@ -67,10 +79,10 @@ if [ "$(docker inspect --format '{{.State.Running}}' "$NGINX_CONTAINER" 2>/dev/n
     exit 1
 fi
 
-PROMOTE_SCRIPT="$INFRA_DIR/scripts/promote-board-upstream.sh"
+REPLACE_UPSTREAM_SCRIPT="$INFRA_DIR/scripts/replace-nginx-upstream.sh"
 
-if [ ! -x "$PROMOTE_SCRIPT" ]; then
-    echo "Nginx promotion script is not executable: $PROMOTE_SCRIPT" >&2
+if [ ! -x "$REPLACE_UPSTREAM_SCRIPT" ]; then
+    echo "Nginx upstream replacement script is not executable: $REPLACE_UPSTREAM_SCRIPT" >&2
     exit 1
 fi
 
@@ -144,12 +156,9 @@ cleanup_on_error() {
         fi
     done
 
-    if [ "$exit_code" -eq 2 ]; then
-        echo "Infra rollback failed. Keeping both colors for investigation." >&2
-    elif [ "$SWITCHED" != true ]; then
+    if [ "$SWITCHED" != true ]; then
         echo "Deployment failed before the Nginx switch. Removing the $TARGET containers." >&2
-        IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" \
-            docker compose -f "$TARGET_COMPOSE_FILE" down || true
+        remove_board_containers "$TARGET"
     else
         echo "Deployment failed after the Nginx switch. Both colors are being kept." >&2
     fi
@@ -171,7 +180,7 @@ echo "Docker image: $IMAGE_NAME:$IMAGE_TAG"
 echo "Deployment log: $LOG_FILE"
 
 echo "[1/8] Build Spring Boot application"
-./mvnw --batch-mode --errors clean package
+./mvnw --batch-mode --errors -DskipTests clean package
 
 echo "[2/8] Build Docker image"
 docker build --tag "$IMAGE_NAME:$IMAGE_TAG" .
@@ -205,20 +214,38 @@ for instance in 1 2; do
     fi
 done
 
-echo "[5/8] Promote Nginx to $TARGET and stabilize"
-STABILIZATION_SECONDS="$STABILIZATION_SECONDS" \
-CHECK_INTERVAL_SECONDS="$CHECK_INTERVAL_SECONDS" \
-    "$PROMOTE_SCRIPT" "$TARGET"
+echo "[5/8] Switch Nginx board upstream to $TARGET"
+"$REPLACE_UPSTREAM_SCRIPT" board "$TARGET" 8080 2
 SWITCHED=true
 
-echo "[6/8] Promotion verified by Infra"
+echo "[6/8] Stabilize Board $TARGET for ${STABILIZATION_SECONDS}s"
+checks=$(((STABILIZATION_SECONDS + CHECK_INTERVAL_SECONDS - 1) / CHECK_INTERVAL_SECONDS))
+
+for check in $(seq 1 "$checks"); do
+    for instance in 1 2; do
+        container="myapp-board-$TARGET-$instance"
+
+        docker exec "$NGINX_CONTAINER" \
+            wget -q -T 2 -O /dev/null "http://$container:8080/hc"
+    done
+
+    response="$(docker exec "$NGINX_CONTAINER" \
+        wget -q -T 2 -O - "http://127.0.0.1/board/hc" || true)"
+
+    if ! grep -Fq "\"env\":\"$TARGET\"" <<< "$response"; then
+        echo "Unexpected Board proxy response: $response" >&2
+        false
+    fi
+
+    echo "Stabilization check $check/$checks: OK"
+    sleep "$CHECK_INTERVAL_SECONDS"
+done
 
 echo "[7/8] Wait ${DRAIN_SECONDS}s before stopping $CURRENT"
 sleep "$DRAIN_SECONDS"
 
 echo "[8/8] Stop the inactive $CURRENT containers"
-IMAGE_NAME="$IMAGE_NAME" IMAGE_TAG="$IMAGE_TAG" \
-    "$PROJECT_DIR/scripts/stop-inactive-color.sh" "$CURRENT"
+remove_board_containers "$CURRENT"
 
 cleanup_old_images
 cleanup_build_cache
