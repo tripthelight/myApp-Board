@@ -78,6 +78,27 @@ public class BoardController {
         return updateBoard(id, body);
     }
 
+    @DeleteMapping("/{id}")
+    public ResponseEntity<?> delete(@PathVariable Long id) {
+        return deleteBoard(id);
+    }
+
+    @DeleteMapping("/delete/{id}")
+    public ResponseEntity<?> deleteByPath(@PathVariable Long id) {
+        return deleteBoard(id);
+    }
+
+    @PostMapping("/delete/{id}")
+    public ResponseEntity<?> deleteByPostPath(@PathVariable Long id) {
+        return deleteBoard(id);
+    }
+
+    @PostMapping("/delete")
+    public ResponseEntity<?> deleteByPost(@RequestBody Map<String, Object> body) {
+        Long id = parseId(body.get("id"));
+        return deleteBoard(id);
+    }
+
     private ResponseEntity<?> findBoard(Long id) {
         try {
             return ResponseEntity.ok(boardService.findById(id));
@@ -94,6 +115,19 @@ public class BoardController {
         try {
             BoardRequest request = toRequest(id, body);
             return ResponseEntity.ok(boardService.update(id, request));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.notFound().build();
+        }
+    }
+
+    private ResponseEntity<?> deleteBoard(Long id) {
+        if (id == null) {
+            return ResponseEntity.badRequest().body(Map.of("error", "id is required"));
+        }
+
+        try {
+            boardService.delete(id);
+            return ResponseEntity.noContent().build();
         } catch (IllegalArgumentException e) {
             return ResponseEntity.notFound().build();
         }
