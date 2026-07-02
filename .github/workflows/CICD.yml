@@ -36,6 +36,7 @@ jobs:
           docker inspect myapp-nginx >/dev/null
           test -d /home/um/myApp-Infra
           test -f /home/um/myApp-Infra/scripts/deploy-board.sh
+          test -f /home/um/myApp-Infra/scripts/check-app-flow.sh
 
       - name: Build Board jar
         run: |
@@ -58,6 +59,13 @@ jobs:
           cd /home/um/myApp-Infra
           chmod +x scripts/*.sh
           IMAGE_OVERRIDE="myapp-board:${IMAGE_TAG}" ./scripts/deploy-board.sh
+
+      - name: Run application flow regression check
+        run: |
+          cd /home/um/myApp-Infra
+          git pull --ff-only origin main
+          chmod +x scripts/*.sh
+          ./scripts/check-app-flow.sh
 
       - name: Collect post-deployment evidence
         if: always()
