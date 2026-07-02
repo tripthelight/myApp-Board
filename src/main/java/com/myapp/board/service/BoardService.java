@@ -4,6 +4,7 @@ import com.myapp.board.domain.Board;
 import com.myapp.board.dto.BoardRequest;
 import com.myapp.board.dto.BoardResponse;
 import com.myapp.board.repository.BoardRepository;
+import jakarta.annotation.PostConstruct;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -17,6 +18,17 @@ public class BoardService {
 
     public BoardService(BoardRepository boardRepository) {
         this.boardRepository = boardRepository;
+    }
+
+    @PostConstruct
+    @Transactional
+    public void seed() {
+        if (boardRepository.count() > 0) {
+            return;
+        }
+
+        boardRepository.save(new Board("첫 번째 게시글", "Board service 응답 테스트", "testuser"));
+        boardRepository.save(new Board("두 번째 게시글", "Nginx /board/list proxy 테스트", "testuser"));
     }
 
     public List<BoardResponse> findAll() {
@@ -34,9 +46,9 @@ public class BoardService {
     @Transactional
     public BoardResponse create(BoardRequest request) {
         Board board = new Board(
-                request.getTitle(),
-                request.getContent(),
-                request.getWriter()
+                normalize(request.getTitle(), "제목 없음"),
+                normalize(request.getContent(), ""),
+                normalize(request.getWriter(), "anonymous")
         );
 
         Board savedBoard = boardRepository.save(board);
@@ -49,9 +61,9 @@ public class BoardService {
         Board board = findBoard(boardId);
 
         board.update(
-                request.getTitle(),
-                request.getContent(),
-                request.getWriter()
+                normalize(request.getTitle(), board.toResponse().getTitle()),
+                normalize(request.getContent(), board.toResponse().getContent()),
+                normalize(request.getWriter(), board.toResponse().getWriter())
         );
 
         return board.toResponse();
@@ -66,5 +78,13 @@ public class BoardService {
     private Board findBoard(Long boardId) {
         return boardRepository.findById(boardId)
                 .orElseThrow(() -> new IllegalArgumentException("Board not found. id=" + boardId));
+    }
+
+    private String normalize(String value, String defaultValue) {
+        if (value == null || value.isBlank()) {
+            return defaultValue;
+        }
+
+        return value.trim();
     }
 }

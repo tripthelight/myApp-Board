@@ -1,30 +1,24 @@
 package com.myapp.board.controller;
 
+import com.myapp.board.dto.BoardRequest;
+import com.myapp.board.service.BoardService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 @RestController
 public class BoardController {
 
-    private final Map<Long, BoardItem> boards = new ConcurrentHashMap<>();
+    private final BoardService boardService;
 
-    public BoardController() {
-        boards.put(1L, new BoardItem(1L, "첫 번째 게시글", "Board service 응답 테스트", "testuser"));
-        boards.put(2L, new BoardItem(2L, "두 번째 게시글", "Nginx /board/list proxy 테스트", "testuser"));
+    public BoardController(BoardService boardService) {
+        this.boardService = boardService;
     }
 
     @GetMapping("/list")
     public ResponseEntity<?> list() {
-        return ResponseEntity.ok(
-                boards.values().stream()
-                        .sorted(Comparator.comparing(BoardItem::id))
-                        .toList()
-        );
+        return ResponseEntity.ok(boardService.findAll());
     }
 
     @GetMapping("/{id}")
@@ -85,13 +79,11 @@ public class BoardController {
     }
 
     private ResponseEntity<?> findBoard(Long id) {
-        BoardItem board = boards.get(id);
-
-        if (board == null) {
+        try {
+            return ResponseEntity.ok(boardService.findById(id));
+        } catch (IllegalArgumentException e) {
             return ResponseEntity.notFound().build();
         }
-
-        return ResponseEntity.ok(board);
     }
 
     private ResponseEntity<?> updateBoard(Long id, Map<String, Object> body) {
@@ -99,20 +91,22 @@ public class BoardController {
             return ResponseEntity.badRequest().body(Map.of("error", "id is required"));
         }
 
-        BoardItem current = boards.get(id);
-
-        if (current == null) {
+        try {
+            BoardRequest request = toRequest(id, body);
+            return ResponseEntity.ok(boardService.update(id, request));
+        } catch (IllegalArgumentException e) {
             return ResponseEntity.notFound().build();
         }
+    }
 
-        String title = getString(body, "title", current.title());
-        String content = getString(body, "content", current.content());
-        String writer = getString(body, "writer", current.writer());
+    private BoardRequest toRequest(Long id, Map<String, Object> body) {
+        BoardRequest current = boardService.findById(id).toRequest();
 
-        BoardItem updated = new BoardItem(id, title, content, writer);
-        boards.put(id, updated);
-
-        return ResponseEntity.ok(updated);
+        return new BoardRequest(
+                getString(body, "title", current.getTitle()),
+                getString(body, "content", current.getContent()),
+                getString(body, "writer", current.getWriter())
+        );
     }
 
     private String getString(Map<String, Object> body, String key, String defaultValue) {
@@ -145,13 +139,5 @@ public class BoardController {
         } catch (NumberFormatException e) {
             return null;
         }
-    }
-
-    public record BoardItem(
-            Long id,
-            String title,
-            String content,
-            String writer
-    ) {
     }
 }

@@ -53,4 +53,8 @@ public class BoardResponse {
     public LocalDateTime getUpdatedAt() {
         return updatedAt;
     }
+
+    public BoardRequest toRequest() {
+        return new BoardRequest(title, content, writer);
+    }
 }

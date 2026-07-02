@@ -26,4 +26,16 @@ public class BoardRequest {
     public String getWriter() {
         return writer;
     }
+
+    public void setTitle(String title) {
+        this.title = title;
+    }
+
+    public void setContent(String content) {
+        this.content = content;
+    }
+
+    public void setWriter(String writer) {
+        this.writer = writer;
+    }
 }
