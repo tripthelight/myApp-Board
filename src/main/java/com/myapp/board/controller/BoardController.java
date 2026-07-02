@@ -5,6 +5,7 @@ import com.myapp.board.service.BoardService;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
+import java.net.URI;
 import java.util.Map;
 
 @RestController
@@ -19,6 +20,21 @@ public class BoardController {
     @GetMapping("/list")
     public ResponseEntity<?> list() {
         return ResponseEntity.ok(boardService.findAll());
+    }
+
+    @PostMapping({"", "/", "/write", "/save"})
+    public ResponseEntity<?> create(@RequestBody Map<String, Object> body) {
+        BoardRequest request = new BoardRequest(
+                getString(body, "title", "제목 없음"),
+                getString(body, "content", ""),
+                getString(body, "writer", "anonymous")
+        );
+
+        Object created = boardService.create(request);
+
+        return ResponseEntity
+                .created(URI.create("/board/list"))
+                .body(created);
     }
 
     @GetMapping("/{id}")
