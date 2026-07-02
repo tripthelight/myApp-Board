@@ -2,9 +2,10 @@ name: Deploy Board Local
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
+
+concurrency:
+  group: myapp-board-local-deploy
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -22,11 +23,12 @@ jobs:
       - name: Build board Docker image
         run: |
           IMAGE_TAG="${GITHUB_SHA}"
-          docker build -t myapp-board:${IMAGE_TAG} .
-          docker tag myapp-board:${IMAGE_TAG} myapp-board:latest
+          docker build -t "myapp-board:${IMAGE_TAG}" .
+          docker tag "myapp-board:${IMAGE_TAG}" myapp-board:latest
 
       - name: Deploy board with new image
         run: |
           IMAGE_TAG="${GITHUB_SHA}"
           cd /home/um/myApp-Infra
-          BOARD_IMAGE_TAG="${IMAGE_TAG}" ./scripts/deploy-board.sh
+          chmod +x scripts/*.sh
+          IMAGE_OVERRIDE="myapp-board:${IMAGE_TAG}" ./scripts/deploy-board.sh
