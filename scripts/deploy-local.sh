@@ -4,22 +4,13 @@ set -Eeuo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INFRA_DIR="${MYAPP_INFRA_DIR:-$HOME/myApp-Infra}"
-NGINX_CONTAINER="myapp-nginx"
-NETWORK_NAME="myapp-network"
 IMAGE_NAME="${IMAGE_NAME:-myapp-board}"
 IMAGE_TAG="${IMAGE_TAG:-manual-$(date +%Y%m%d%H%M%S)}"
-DRAIN_SECONDS="${DRAIN_SECONDS:-10}"
-STABILIZATION_SECONDS="${STABILIZATION_SECONDS:-30}"
-CHECK_INTERVAL_SECONDS="${CHECK_INTERVAL_SECONDS:-2}"
-KEEP_IMAGE_COUNT="${KEEP_IMAGE_COUNT:-3}"
-BUILD_CACHE_PRUNE_UNTIL="${BUILD_CACHE_PRUNE_UNTIL:-24h}"
 DEPLOY_LOG_DIR="${DEPLOY_LOG_DIR:-$HOME/myapp-deploy-logs/board}"
-DEPLOY_STARTED_AT="$(date '+%Y-%m-%dT%H:%M:%S%z')"
 DEPLOY_RUN_ID="${GITHUB_RUN_ID:-manual}-$(date '+%Y%m%d-%H%M%S')"
+LOG_FILE="$DEPLOY_LOG_DIR/deploy-$DEPLOY_RUN_ID.log"
 
 mkdir -p "$DEPLOY_LOG_DIR"
-LOG_FILE="$DEPLOY_LOG_DIR/deploy-$DEPLOY_RUN_ID.log"
-HISTORY_FILE="$DEPLOY_LOG_DIR/deployment-history.tsv"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 write_action_output() {
@@ -28,239 +19,19 @@ write_action_output() {
     fi
 }
 
-record_history() {
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$DEPLOY_STARTED_AT" "$1" "$IMAGE_TAG" \
-        "${CURRENT:-unknown}" "${TARGET:-unknown}" "${GITHUB_ACTOR:-manual}" \
-        >> "$HISTORY_FILE"
-}
-
-remove_board_containers() {
-    color="$1"
-
-    for instance in 1 2; do
-        container="myapp-board-$color-$instance"
-
-        if docker inspect "$container" >/dev/null 2>&1; then
-            docker rm -f "$container" || true
-        fi
-    done
-}
-
 write_action_output log_file "$LOG_FILE"
-
-require_command() {
-    if ! command -v "$1" >/dev/null 2>&1; then
-        echo "Required command not found: $1" >&2
-        exit 1
-    fi
-}
-
-require_command docker
-require_command java
-
-if ! docker info >/dev/null 2>&1; then
-    echo "Docker is not running or the current user cannot access it." >&2
-    exit 1
-fi
-
-if ! docker compose version >/dev/null 2>&1; then
-    echo "Docker Compose v2 is not available." >&2
-    exit 1
-fi
-
-if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
-    echo "Docker network does not exist: $NETWORK_NAME" >&2
-    exit 1
-fi
-
-if [ "$(docker inspect --format '{{.State.Running}}' "$NGINX_CONTAINER" 2>/dev/null || true)" != true ]; then
-    echo "Nginx container is not running: $NGINX_CONTAINER" >&2
-    exit 1
-fi
-
-REPLACE_UPSTREAM_SCRIPT="$INFRA_DIR/scripts/replace-nginx-upstream.sh"
-
-if [ ! -x "$REPLACE_UPSTREAM_SCRIPT" ]; then
-    echo "Nginx upstream replacement script is not executable: $REPLACE_UPSTREAM_SCRIPT" >&2
-    exit 1
-fi
-
-loaded_config="$(docker exec "$NGINX_CONTAINER" nginx -T 2>&1)"
-
-if grep -Fq 'server myapp-board-blue-1:8080' <<< "$loaded_config"; then
-    CURRENT=blue
-    TARGET=green
-elif grep -Fq 'server myapp-board-green-1:8080' <<< "$loaded_config"; then
-    CURRENT=green
-    TARGET=blue
-else
-    echo "Could not determine the active Board color." >&2
-    exit 1
-fi
-
-TARGET_COMPOSE_FILE="$PROJECT_DIR/deploy/docker-compose-$TARGET.yml"
-SWITCHED=false
-
-if [[ ! "$STABILIZATION_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
-   [[ ! "$CHECK_INTERVAL_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Stabilization and check interval values must be positive integers." >&2
-    exit 1
-fi
-
-if [[ ! "$KEEP_IMAGE_COUNT" =~ ^[1-9][0-9]*$ ]]; then
-    echo "Keep image count must be a positive integer." >&2
-    exit 1
-fi
-
-cleanup_old_images() {
-    echo
-    echo "Cleanup old Docker images for $IMAGE_NAME. Keeping newest $KEEP_IMAGE_COUNT image(s)."
-
-    image_count=0
-
-    while IFS= read -r image_ref; do
-        if [ -z "$image_ref" ] || [[ "$image_ref" == *":<none>" ]]; then
-            continue
-        fi
-
-        image_count=$((image_count + 1))
-
-        if [ "$image_count" -le "$KEEP_IMAGE_COUNT" ]; then
-            echo "Keep image: $image_ref"
-            continue
-        fi
-
-        echo "Remove old image: $image_ref"
-        docker image rm "$image_ref" || true
-    done < <(docker image ls "$IMAGE_NAME" --format '{{.Repository}}:{{.Tag}}')
-}
-
-cleanup_build_cache() {
-    echo
-    echo "Cleanup Docker build cache older than $BUILD_CACHE_PRUNE_UNTIL."
-    docker builder prune -f --filter "until=$BUILD_CACHE_PRUNE_UNTIL" || true
-}
-
-cleanup_on_error() {
-    exit_code=$?
-
-    trap - ERR
-    echo "Deployment failed with exit code $exit_code." >&2
-
-    for instance in 1 2; do
-        container="myapp-board-${TARGET:-unknown}-$instance"
-        if docker inspect "$container" >/dev/null 2>&1; then
-            echo "----- Last 200 log lines: $container -----" >&2
-            docker logs --tail 200 "$container" 2>&1 || true
-        fi
-    done
-
-    if [ "$SWITCHED" != true ]; then
-        echo "Deployment failed before the Nginx switch. Removing the $TARGET containers." >&2
-        remove_board_containers "$TARGET"
-    else
-        echo "Deployment failed after the Nginx switch. Both colors are being kept." >&2
-    fi
-
-    record_history FAILED
-    write_action_output deployment_status FAILED
-    write_action_output previous_color "${CURRENT:-unknown}"
-    write_action_output target_color "${TARGET:-unknown}"
-
-    exit "$exit_code"
-}
-
-trap cleanup_on_error ERR
 
 cd "$PROJECT_DIR"
 
-echo "Deployment plan: $CURRENT -> $TARGET"
-echo "Docker image: $IMAGE_NAME:$IMAGE_TAG"
+echo "Board image build: $IMAGE_NAME:$IMAGE_TAG"
 echo "Deployment log: $LOG_FILE"
 
-echo "[1/8] Build Spring Boot application"
+echo "[1/3] Build Spring Boot application"
 ./mvnw --batch-mode --errors -DskipTests clean package
 
-echo "[2/8] Build Docker image"
+echo "[2/3] Build Docker image"
 docker build --tag "$IMAGE_NAME:$IMAGE_TAG" .
 
-echo "[3/8] Start two $TARGET containers"
-export IMAGE_NAME IMAGE_TAG
-docker compose -f "$TARGET_COMPOSE_FILE" config >/dev/null
-docker compose -f "$TARGET_COMPOSE_FILE" up -d --force-recreate
-
-echo "[4/8] Check both $TARGET containers"
-for instance in 1 2; do
-    container="myapp-board-$TARGET-$instance"
-    ready=false
-
-    for attempt in $(seq 1 30); do
-        echo "Health check $container: $attempt/30"
-
-        if docker run --rm --network "$NETWORK_NAME" busybox:1.36 \
-            wget -q -T 2 -O /dev/null "http://$container:8080/hc"; then
-            ready=true
-            break
-        fi
-
-        sleep 2
-    done
-
-    if [ "$ready" != true ]; then
-        docker logs "$container" || true
-        echo "Health check failed: $container" >&2
-        false
-    fi
-done
-
-echo "[5/8] Switch Nginx board upstream to $TARGET"
-"$REPLACE_UPSTREAM_SCRIPT" board "$TARGET" 8080 2
-SWITCHED=true
-
-echo "[6/8] Stabilize Board $TARGET for ${STABILIZATION_SECONDS}s"
-checks=$(((STABILIZATION_SECONDS + CHECK_INTERVAL_SECONDS - 1) / CHECK_INTERVAL_SECONDS))
-
-for check in $(seq 1 "$checks"); do
-    for instance in 1 2; do
-        container="myapp-board-$TARGET-$instance"
-
-        docker exec "$NGINX_CONTAINER" \
-            wget -q -T 2 -O /dev/null "http://$container:8080/hc"
-    done
-
-    response="$(docker exec "$NGINX_CONTAINER" \
-        wget -q -T 2 -O - "http://127.0.0.1/board/hc" || true)"
-
-    if ! grep -Fq "\"env\":\"$TARGET\"" <<< "$response"; then
-        echo "Unexpected Board proxy response: $response" >&2
-        false
-    fi
-
-    echo "Stabilization check $check/$checks: OK"
-    sleep "$CHECK_INTERVAL_SECONDS"
-done
-
-echo "[7/8] Wait ${DRAIN_SECONDS}s before stopping $CURRENT"
-sleep "$DRAIN_SECONDS"
-
-echo "[8/8] Stop the inactive $CURRENT containers"
-remove_board_containers "$CURRENT"
-
-cleanup_old_images
-cleanup_build_cache
-
-trap - ERR
-
-record_history SUCCESS
-write_action_output deployment_status SUCCESS
-write_action_output previous_color "$CURRENT"
-write_action_output target_color "$TARGET"
-
-echo
-docker ps --filter 'name=myapp-board-' \
-    --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
-
-echo
-echo "Deployment complete: $CURRENT -> $TARGET"
-echo "Deployment history: $HISTORY_FILE"
+echo "[3/3] Deploy through Infra default.conf switcher"
+cd "$INFRA_DIR"
+IMAGE_OVERRIDE="$IMAGE_NAME:$IMAGE_TAG" ./scripts/deploy-board.sh
