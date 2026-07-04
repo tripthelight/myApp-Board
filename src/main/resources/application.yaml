@@ -27,3 +27,6 @@ serverName: ${SERVER_NAME:local_server}
 
 app:
   color: ${APP_COLOR:local}
+
+jwt:
+  secret: ${JWT_SECRET}
