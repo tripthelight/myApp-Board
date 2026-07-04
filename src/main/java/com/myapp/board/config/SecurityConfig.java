@@ -68,7 +68,7 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .requestMatchers("/hc", "/env").permitAll()
-                        .anyRequest().hasAnyRole("USER", "ADMIN")
+			.anyRequest().hasAnyAuthority("ROLE_USER", "ROLE_ADMIN")
                 )
                 .exceptionHandling(e -> e
                         .authenticationEntryPoint((request, response, authException) ->
