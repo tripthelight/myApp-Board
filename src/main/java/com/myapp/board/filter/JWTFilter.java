@@ -13,6 +13,7 @@ import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.filter.OncePerRequestFilter;
 import org.springframework.security.core.context.SecurityContext;
+import org.springframework.security.core.context.SecurityContextHolderStrategy;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -21,6 +22,8 @@ import java.util.List;
 public class JWTFilter extends OncePerRequestFilter {
 
     private final JWTUtil jwtUtil;
+    private final SecurityContextHolderStrategy securityContextHolderStrategy =
+        SecurityContextHolder.getContextHolderStrategy();
 
     public JWTFilter(JWTUtil jwtUtil) {
         this.jwtUtil = jwtUtil;
@@ -75,7 +78,7 @@ public class JWTFilter extends OncePerRequestFilter {
 
 	SecurityContext context = SecurityContextHolder.createEmptyContext();
 	context.setAuthentication(auth);
-	SecurityContextHolder.setContext(context);
+	securityContextHolderStrategy.setContext(context);
 	System.out.println("BOARD_JWT authenticated=" + auth.isAuthenticated() + ", authorities=" + auth.getAuthorities());
 
         filterChain.doFilter(request, response);
