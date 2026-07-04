@@ -19,6 +19,12 @@ import java.util.List;
 
 public class JWTFilter extends OncePerRequestFilter {
 
+    private final JWTUtil jwtUtil;
+
+    public JWTFilter(JWTUtil jwtUtil) {
+        this.jwtUtil = jwtUtil;
+    }
+
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         String method = request.getMethod();
@@ -51,13 +57,13 @@ public class JWTFilter extends OncePerRequestFilter {
 
         String accessToken = authorization.substring("Bearer ".length()).trim();
 
-        if (!JWTUtil.isValid(accessToken, true)) {
+        if (!jwtUtil.isValid(accessToken, true)) {
             writeUnauthorized(response);
             return;
         }
 
-        String username = JWTUtil.getUsername(accessToken);
-        String role = JWTUtil.getRole(accessToken);
+        String username = jwtUtil.getUsername(accessToken);
+        String role = jwtUtil.getRole(accessToken);
 
         List<GrantedAuthority> authorities =
                 Collections.singletonList(new SimpleGrantedAuthority(role));

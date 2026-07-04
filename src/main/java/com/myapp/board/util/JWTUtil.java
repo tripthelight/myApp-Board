@@ -11,16 +11,16 @@ import java.nio.charset.StandardCharsets;
 @Component
 public class JWTUtil {
 
-    private static SecretKey secretKey;
+    private final SecretKey secretKey;
 
     public JWTUtil(@Value("${jwt.secret}") String secretKeyString) {
-        JWTUtil.secretKey = new SecretKeySpec(
+        this.secretKey = new SecretKeySpec(
                 secretKeyString.getBytes(StandardCharsets.UTF_8),
                 Jwts.SIG.HS256.key().build().getAlgorithm()
         );
     }
 
-    public static String getUsername(String token) {
+    public String getUsername(String token) {
         return Jwts.parser()
                 .verifyWith(secretKey)
                 .build()
@@ -29,7 +29,7 @@ public class JWTUtil {
                 .get("sub", String.class);
     }
 
-    public static String getRole(String token) {
+    public String getRole(String token) {
         return Jwts.parser()
                 .verifyWith(secretKey)
                 .build()
@@ -38,7 +38,7 @@ public class JWTUtil {
                 .get("role", String.class);
     }
 
-    public static Boolean isValid(String token, Boolean isAccess) {
+    public boolean isValid(String token, boolean isAccess) {
         try {
             String category = Jwts.parser()
                     .verifyWith(secretKey)

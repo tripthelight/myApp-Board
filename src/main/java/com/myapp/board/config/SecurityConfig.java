@@ -1,6 +1,7 @@
 package com.myapp.board.config;
 
 import com.myapp.board.filter.JWTFilter;
+import com.myapp.board.util.JWTUtil;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
@@ -22,8 +23,14 @@ import java.util.List;
 @EnableWebSecurity
 public class SecurityConfig {
 
+    private final JWTUtil jwtUtil;
+
     @Value("${app.cors.allowed-origin:http://localhost:5173}")
     private String allowedOrigin;
+
+    public SecurityConfig(JWTUtil jwtUtil) {
+        this.jwtUtil = jwtUtil;
+    }
 
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
@@ -71,7 +78,7 @@ public class SecurityConfig {
                                 response.sendError(HttpServletResponse.SC_FORBIDDEN)
                         )
                 )
-                .addFilterBefore(new JWTFilter(), LogoutFilter.class)
+                .addFilterBefore(new JWTFilter(jwtUtil), LogoutFilter.class)
                 .sessionManagement(session ->
                         session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
                 );
