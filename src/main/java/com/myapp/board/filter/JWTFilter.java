@@ -65,6 +65,7 @@ public class JWTFilter extends OncePerRequestFilter {
 
         String username = jwtUtil.getUsername(accessToken);
         String role = jwtUtil.getRole(accessToken);
+	System.out.println("BOARD_JWT username=" + username + ", role=" + role);
 
         List<GrantedAuthority> authorities =
                 Collections.singletonList(new SimpleGrantedAuthority(role));
@@ -75,6 +76,7 @@ public class JWTFilter extends OncePerRequestFilter {
 	SecurityContext context = SecurityContextHolder.createEmptyContext();
 	context.setAuthentication(auth);
 	SecurityContextHolder.setContext(context);
+	System.out.println("BOARD_JWT authenticated=" + auth.isAuthenticated() + ", authorities=" + auth.getAuthorities());
 
         filterChain.doFilter(request, response);
     }
