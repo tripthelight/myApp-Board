@@ -56,10 +56,21 @@ public class Board {
         this.updatedAt = LocalDateTime.now();
     }
 
-    public void update(String title, String content, String writer) {
+    public void update(String title, String content) {
         this.title = title;
         this.content = content;
-        this.writer = writer;
+    }
+
+    public String getTitle() {
+        return title;
+    }
+
+    public String getContent() {
+        return content;
+    }
+
+    public String getWriter() {
+        return writer;
     }
 
     public BoardResponse toResponse() {

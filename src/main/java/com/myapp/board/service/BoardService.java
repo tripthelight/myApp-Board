@@ -5,6 +5,7 @@ import com.myapp.board.dto.BoardRequest;
 import com.myapp.board.dto.BoardResponse;
 import com.myapp.board.repository.BoardRepository;
 import jakarta.annotation.PostConstruct;
+import org.springframework.security.access.AccessDeniedException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -44,11 +45,11 @@ public class BoardService {
     }
 
     @Transactional
-    public BoardResponse create(BoardRequest request) {
+    public BoardResponse create(BoardRequest request, String username) {
         Board board = new Board(
                 normalize(request.getTitle(), "제목 없음"),
                 normalize(request.getContent(), ""),
-                normalize(request.getWriter(), "anonymous")
+                normalize(username, "anonymous")
         );
 
         Board savedBoard = boardRepository.save(board);
@@ -57,27 +58,36 @@ public class BoardService {
     }
 
     @Transactional
-    public BoardResponse update(Long boardId, BoardRequest request) {
+    public BoardResponse update(Long boardId, BoardRequest request, String username, boolean admin) {
         Board board = findBoard(boardId);
+        validateOwnerOrAdmin(board, username, admin);
 
         board.update(
-                normalize(request.getTitle(), board.toResponse().getTitle()),
-                normalize(request.getContent(), board.toResponse().getContent()),
-                normalize(request.getWriter(), board.toResponse().getWriter())
+                normalize(request.getTitle(), board.getTitle()),
+                normalize(request.getContent(), board.getContent())
         );
 
         return board.toResponse();
     }
 
     @Transactional
-    public void delete(Long boardId) {
+    public void delete(Long boardId, String username, boolean admin) {
         Board board = findBoard(boardId);
+        validateOwnerOrAdmin(board, username, admin);
         boardRepository.delete(board);
     }
 
     private Board findBoard(Long boardId) {
         return boardRepository.findById(boardId)
                 .orElseThrow(() -> new IllegalArgumentException("Board not found. id=" + boardId));
+    }
+
+    private void validateOwnerOrAdmin(Board board, String username, boolean admin) {
+        if (admin || board.getWriter().equals(username)) {
+            return;
+        }
+
+        throw new AccessDeniedException("Only the writer or admin can modify this board.");
     }
 
     private String normalize(String value, String defaultValue) {
