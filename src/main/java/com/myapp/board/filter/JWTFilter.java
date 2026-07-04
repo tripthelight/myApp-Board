@@ -49,10 +49,10 @@ public class JWTFilter extends OncePerRequestFilter {
     ) throws ServletException, IOException {
         String authorization = request.getHeader("Authorization");
 
-        if (authorization == null || authorization.isBlank()) {
-            filterChain.doFilter(request, response);
-            return;
-        }
+	if (authorization == null || authorization.isBlank()) {
+    	    writeUnauthorized(response);
+    	    return;
+	}	
 
         if (!authorization.startsWith("Bearer ")) {
             writeUnauthorized(response);
@@ -68,7 +68,6 @@ public class JWTFilter extends OncePerRequestFilter {
 
         String username = jwtUtil.getUsername(accessToken);
         String role = jwtUtil.getRole(accessToken);
-	System.out.println("BOARD_JWT username=" + username + ", role=" + role);
 
         List<GrantedAuthority> authorities =
                 Collections.singletonList(new SimpleGrantedAuthority(role));
@@ -79,7 +78,6 @@ public class JWTFilter extends OncePerRequestFilter {
 	SecurityContext context = SecurityContextHolder.createEmptyContext();
 	context.setAuthentication(auth);
 	securityContextHolderStrategy.setContext(context);
-	System.out.println("BOARD_JWT authenticated=" + auth.isAuthenticated() + ", authorities=" + auth.getAuthorities());
 
         filterChain.doFilter(request, response);
     }
