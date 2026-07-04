@@ -12,6 +12,7 @@ import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.filter.OncePerRequestFilter;
+import org.springframework.security.core.context.SecurityContext;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -69,9 +70,11 @@ public class JWTFilter extends OncePerRequestFilter {
                 Collections.singletonList(new SimpleGrantedAuthority(role));
 
         Authentication auth =
-                new UsernamePasswordAuthenticationToken(username, null, authorities);
+        UsernamePasswordAuthenticationToken.authenticated(username, null, authorities);
 
-        SecurityContextHolder.getContext().setAuthentication(auth);
+	SecurityContext context = SecurityContextHolder.createEmptyContext();
+	context.setAuthentication(auth);
+	SecurityContextHolder.setContext(context);
 
         filterChain.doFilter(request, response);
     }
