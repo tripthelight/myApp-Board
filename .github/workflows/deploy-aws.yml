@@ -1,0 +1,365 @@
+name: Deploy Board AWS
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: myapp-board-aws-deploy
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: tripthelight/myapp-board
+
+jobs:
+  build-publish:
+    name: Build and publish Board image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    outputs:
+      image-reference: ${{ steps.image.outputs.reference }}
+
+    steps:
+      - name: Checkout Board repository
+        uses: actions/checkout@v6
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: maven
+
+      - name: Build Board jar
+        run: |
+          set -Eeuo pipefail
+
+          chmod +x ./mvnw
+          ./mvnw clean package -DskipTests
+
+      - name: Set image reference
+        id: image
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          IMAGE_REFERENCE="${REGISTRY}/${IMAGE_NAME}:${GITHUB_SHA}"
+
+          echo "reference=$IMAGE_REFERENCE" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_REFERENCE=$IMAGE_REFERENCE"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Board image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.image.outputs.reference }}
+          provenance: false
+
+      - name: Write build summary
+        shell: bash
+        run: |
+          {
+            echo "## Board image published"
+            echo
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Repository | \`${GITHUB_REPOSITORY}\` |"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+            echo "| Image | \`${{ steps.image.outputs.reference }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deploy:
+    name: Deploy Board to AWS
+    needs:
+      - build-publish
+
+    runs-on:
+      - self-hosted
+      - linux
+      - x64
+      - myapp-board-prod
+
+    timeout-minutes: 30
+
+    env:
+      INFRA_DIR: /home/ubuntu/myapp/infra/current
+      IMAGE_REFERENCE: ${{ needs.build-publish.outputs.image-reference }}
+      GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+      GHCR_READ_TOKEN: ${{ secrets.GHCR_READ_TOKEN }}
+
+    steps:
+      - name: Verify AWS deployment environment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          test "$(id -un)" = "ubuntu"
+
+          case "$IMAGE_REFERENCE" in
+            ghcr.io/tripthelight/myapp-board:[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f])
+              ;;
+            *)
+              echo "ERROR: invalid Board image reference: $IMAGE_REFERENCE" >&2
+              exit 1
+              ;;
+          esac
+
+          test -d "$INFRA_DIR"
+          test -f "$INFRA_DIR/scripts/deploy-board.sh"
+          test -f "$INFRA_DIR/scripts/deploy-service.sh"
+          test -f "$INFRA_DIR/scripts/render-nginx-config.sh"
+          test -f "$INFRA_DIR/nginx/conf.d/default.conf"
+          test -r /etc/myapp/production.env
+
+          docker version >/dev/null
+          docker network inspect myapp-network >/dev/null
+          docker inspect myapp-nginx >/dev/null
+          docker inspect myapp-mariadb >/dev/null
+
+          CURRENT_BRANCH="$(
+            git -C "$INFRA_DIR" branch --show-current
+          )"
+
+          if [ "$CURRENT_BRANCH" != "aws-production" ]; then
+            echo "ERROR: unexpected Infra branch: $CURRENT_BRANCH" >&2
+            exit 1
+          fi
+
+          if [ -n "$(
+            git -C "$INFRA_DIR" status --porcelain
+          )" ]; then
+            echo "ERROR: Infra working tree is not clean." >&2
+            git -C "$INFRA_DIR" status --short
+            exit 1
+          fi
+
+          if [ -z "$GHCR_USERNAME" ]; then
+            echo "ERROR: GHCR_USERNAME is empty." >&2
+            exit 1
+          fi
+
+          if [ -z "$GHCR_READ_TOKEN" ]; then
+            echo "ERROR: GHCR_READ_TOKEN is empty." >&2
+            exit 1
+          fi
+
+      - name: Verify Infra synchronization
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          git -C "$INFRA_DIR" fetch \
+            origin \
+            aws-production-infra
+
+          LOCAL_INFRA_COMMIT="$(
+            git -C "$INFRA_DIR" rev-parse HEAD
+          )"
+
+          REMOTE_INFRA_COMMIT="$(
+            git -C "$INFRA_DIR" rev-parse origin/aws-production-infra
+          )"
+
+          echo "LOCAL_INFRA_COMMIT=$LOCAL_INFRA_COMMIT"
+          echo "REMOTE_INFRA_COMMIT=$REMOTE_INFRA_COMMIT"
+
+          if [ "$LOCAL_INFRA_COMMIT" != "$REMOTE_INFRA_COMMIT" ]; then
+            echo "ERROR: AWS Infra is not synchronized with origin/aws-production-infra." >&2
+            exit 1
+          fi
+
+      - name: Log in to GHCR
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          DOCKER_CONFIG_DIR="$RUNNER_TEMP/board-docker-config"
+
+          rm -rf "$DOCKER_CONFIG_DIR"
+          mkdir -p "$DOCKER_CONFIG_DIR"
+          chmod 700 "$DOCKER_CONFIG_DIR"
+
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG_DIR" >> "$GITHUB_ENV"
+
+          printf '%s' "$GHCR_READ_TOKEN" \
+            | docker \
+                --config "$DOCKER_CONFIG_DIR" \
+                login \
+                ghcr.io \
+                --username "$GHCR_USERNAME" \
+                --password-stdin
+
+      - name: Pull Board image
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          docker \
+            --config "$DOCKER_CONFIG" \
+            pull "$IMAGE_REFERENCE"
+
+      - name: Deploy Board without downtime
+        id: deploy
+        shell: bash
+        env:
+          DRAIN_SECONDS: "10"
+          STABILIZATION_SECONDS: "30"
+          CHECK_INTERVAL_SECONDS: "2"
+        run: |
+          set -Eeuo pipefail
+
+          cd "$INFRA_DIR"
+
+          IMAGE_OVERRIDE="$IMAGE_REFERENCE" \
+          PRODUCTION_ENV_FILE="/etc/myapp/production.env" \
+            bash "$INFRA_DIR/scripts/deploy-board.sh"
+
+      - name: Verify Board deployment
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          RUNNING_CONTAINERS="$(
+            docker ps \
+              --filter 'name=myapp-board-' \
+              --format '{{.Names}}'
+          )"
+
+          RUNNING_COUNT="$(
+            printf '%s\n' "$RUNNING_CONTAINERS" \
+              | sed '/^$/d' \
+              | wc -l \
+              | tr -d ' '
+          )"
+
+          if [ "$RUNNING_COUNT" -lt 2 ]; then
+            echo "ERROR: fewer than two Board containers are running." >&2
+            printf '%s\n' "$RUNNING_CONTAINERS"
+            exit 1
+          fi
+
+          HEALTH_RESPONSE="$(
+            curl \
+              --fail \
+              --silent \
+              --show-error \
+              --max-time 10 \
+              http://127.0.0.1/board/hc
+          )"
+
+          printf '%s\n' "$HEALTH_RESPONSE"
+
+          case "$HEALTH_RESPONSE" in
+            *'"env"'*'"serverName"'*)
+              ;;
+            *)
+              echo "ERROR: unexpected Board health response." >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Collect deployment evidence
+        if: always()
+        id: evidence
+        continue-on-error: true
+        shell: bash
+        run: |
+          set +e
+
+          HEALTH_RESPONSE="$(
+            curl \
+              --silent \
+              --show-error \
+              --max-time 10 \
+              http://127.0.0.1/board/hc \
+              2>&1
+          )"
+
+          HEALTH_STATUS="$?"
+
+          RUNNING_CONTAINERS="$(
+            docker ps \
+              --filter 'name=myapp-board-' \
+              --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}' \
+              2>&1
+          )"
+
+          {
+            echo "health-status=$HEALTH_STATUS"
+
+            echo "health-response<<EOF"
+            printf '%s\n' "$HEALTH_RESPONSE"
+            echo "EOF"
+
+            echo "running-containers<<EOF"
+            printf '%s\n' "$RUNNING_CONTAINERS"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Clean temporary Docker credentials
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "${DOCKER_CONFIG:-}" ]; then
+            rm -rf "$DOCKER_CONFIG"
+          fi
+
+      - name: Write deployment summary
+        if: always()
+        shell: bash
+        env:
+          HEALTH_STATUS: ${{ steps.evidence.outputs.health-status }}
+          HEALTH_RESPONSE: ${{ steps.evidence.outputs.health-response }}
+          RUNNING_CONTAINERS: ${{ steps.evidence.outputs.running-containers }}
+        run: |
+          if [ "${HEALTH_STATUS:-1}" = "0" ]; then
+            HEALTH_RESULT="PASS"
+          else
+            HEALTH_RESULT="FAIL"
+          fi
+
+          CURRENT_COLOR="$(
+            cat "$INFRA_DIR/runtime/board-color" \
+              2>/dev/null \
+              || printf 'unknown'
+          )"
+
+          {
+            echo "## Board AWS deployment"
+            echo
+            echo "| Item | Value |"
+            echo "| --- | --- |"
+            echo "| Commit | \`${GITHUB_SHA}\` |"
+            echo "| Image | \`${IMAGE_REFERENCE}\` |"
+            echo "| Current color | \`${CURRENT_COLOR}\` |"
+            echo "| Proxy health | \`${HEALTH_RESULT}\` |"
+            echo
+            echo "### Proxy response"
+            echo
+            echo '```json'
+            printf '%s\n' "${HEALTH_RESPONSE:-not-collected}"
+            echo '```'
+            echo
+            echo "### Running Board containers"
+            echo
+            echo '```text'
+            printf '%s\n' "${RUNNING_CONTAINERS:-not-collected}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
